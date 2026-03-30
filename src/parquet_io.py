@@ -46,7 +46,7 @@ class ParquetStorage:
         try:
             pq.write_table(table, str(tmp_path))
             os.replace(str(tmp_path), str(output_path))
-            logger.info(f"Written {len(df)} rows to {ticker}/{timeframe}_features.parquet")
+            logger.debug(f"Written {len(df)} rows to {ticker}/{timeframe}_features.parquet")
         except Exception as exc:
             logger.error(f"Failed to write parquet for {ticker}/{timeframe}: {exc}")
             if tmp_path.exists():

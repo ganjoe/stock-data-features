@@ -1,6 +1,6 @@
 import logging
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Dict
 import pandas as pd
 from dataclasses import dataclass
@@ -38,8 +38,9 @@ class FeatureProcessor:
         completed = 0
         last_logged_pct = 0
         
-        # Parallel execution on Ticker level
-        with ProcessPoolExecutor(max_workers=self.context.thread_count) as executor:
+        # Parallel execution on Ticker level (ThreadPool: no pickle overhead,
+        # pandas/numpy C-extensions release the GIL for true parallelism)
+        with ThreadPoolExecutor(max_workers=self.context.thread_count) as executor:
             future_to_ticker = {executor.submit(self._process_single_ticker, ticker): ticker for ticker in tickers}
             
             for future in as_completed(future_to_ticker):
@@ -135,19 +136,23 @@ class FeatureProcessor:
                 
                 logger.info(f"⚙️  Injecting cross-sectional feature '{target_col}' into {len(central_df.columns)} tickers for timeframe {tf}...")
                 
-                # Quick pass to inject back into parquet
-                for ticker in central_df.columns:
+                # Parallel inject pass using ThreadPoolExecutor
+                def _inject_rating(ticker_name: str) -> None:
                     try:
-                        df = self.storage.load_ticker_data(ticker, f"{tf}_features")
-                        
-                        # rating_df[ticker] is aligned by timestamp index. 
-                        # We map these values back to the df based on its 'timestamp' column.
-                        ticker_ratings = rating_df[ticker].dropna()
+                        df = self.storage.load_ticker_data(ticker_name, f"{tf}_features")
+                        ticker_ratings = rating_df[ticker_name].dropna()
                         df[target_col] = df['timestamp'].map(ticker_ratings).astype("Int64")
-                        
-                        self.storage.save_ticker_features(ticker, tf, df)
+                        self.storage.save_ticker_features(ticker_name, tf, df)
                     except Exception as e:
-                        logger.error(f"Failed to inject {target_col} for {ticker}: {e}")
+                        logger.error(f"Failed to inject {target_col} for {ticker_name}: {e}")
+
+                with ThreadPoolExecutor(max_workers=self.context.thread_count) as inject_executor:
+                    futures = [inject_executor.submit(_inject_rating, t) for t in central_df.columns]
+                    for f in as_completed(futures):
+                        try:
+                            f.result()
+                        except Exception:
+                            pass  # already logged inside _inject_rating
 
     def _process_single_ticker(self, ticker: str) -> List[TickerProcessResult]:
         """The atomic unit of work executed by worker threads/processes."""

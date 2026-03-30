@@ -19,6 +19,7 @@ zwei Berechnungsmodi bereit:
                     Aktuell unterstützt:
                       - Moving Averages (SMA, EMA)    via POST /features/ma
                       - RS Rating (IBD-Methode)       via POST /features/rs
+                      - Minervini Trend Template      via POST /features/minervini
 
 
 Programmablauf
@@ -31,6 +32,7 @@ Programmablauf
        ├── Wartet auf POST /features/calculate    (Batch von stock-data-node)
        ├── Wartet auf POST /features/ma           (On-the-Fly MA)
        ├── Wartet auf POST /features/rs           (On-the-Fly RS Rating)
+       ├── Wartet auf POST /features/minervini    (On-the-Fly Minervini)
        ├── GET /health                            (Docker Healthcheck)
        └── GET /status                            (Job-Status abfragen)
 
@@ -203,6 +205,80 @@ Zwei Modi je nachdem ob ein Benchmark angegeben wird.
       -d '{"ticker": "MSFT", "benchmark": "QQQ"}'
 
 
+POST /features/minervini
+-------------------------
+Berechnet on-the-fly den Minervini Trend Template Score für einen Ticker.
+Prüft alle 8 Bedingungen des Mark Minervini SEPA-Systems.
+
+  Request Body (JSON):
+    {
+      "ticker":           "AAPL",         (string, Pflicht)  Ticker-Symbol
+      "chart_timeframe":  "1D"            (string, Optional) Quell-Timeframe, Default: "1D"
+    }
+
+  Die 8 Minervini-Bedingungen:
+    1. Preis > SMA 150 UND Preis > SMA 200
+    2. SMA 150 > SMA 200
+    3. SMA 200 steigt (> SMA 200 vor 20 Tagen)
+    4. SMA 50 > SMA 150 UND SMA 50 > SMA 200
+    5. Preis > SMA 50
+    6. Preis >= 52-Wochen-Tief * 1.30 (mind. 30% über Tief)
+    7. Preis >= 52-Wochen-Hoch * 0.75 (max. 25% unter Hoch)
+    8. RS Rating >= 70 (aus Batch-Berechnung, falls verfügbar)
+
+  Response (200 OK):
+    {
+      "ticker":             "AAPL",
+      "chart_timeframe":    "1D",
+      "score":              7,
+      "max_score":          8,
+      "is_trend_template":  false,
+      "conditions": {
+        "1_price_above_sma150_and_sma200":    true,
+        "2_sma150_above_sma200":              true,
+        "3_sma200_trending_up":               true,
+        "4_sma50_above_sma150_and_sma200":    true,
+        "5_price_above_sma50":                true,
+        "6_price_30pct_above_52w_low":        true,
+        "7_price_within_25pct_of_52w_high":   true,
+        "8_rs_rating_above_70":               null
+      },
+      "rs_rating":          null,
+      "rs_available":       false,
+      "context": {
+        "close":    185.50,
+        "sma_50":   182.30,
+        "sma_150":  178.10,
+        "sma_200":  175.40,
+        "high_52w": 198.23,
+        "low_52w":  124.17
+      }
+    }
+
+  Hinweis zu Bedingung 8:
+    Das RS Rating stammt aus der letzten Batch-Berechnung (POST /features/calculate).
+    Wurde noch kein Batch-Lauf ausgeführt, ist rs_available=false und Bedingung 8
+    wird als null (nicht auswertbar) gemeldet. max_score ist dann 7 statt 8.
+
+  Response (404 Not Found):
+    { "error": "No data found for ticker 'XYZ'" }
+
+  Response (400 Bad Request):
+    { "error": "Not enough data for 'XYZ' (need >= 260 rows for 52-week analysis, have 50)" }
+
+  Beispiele:
+
+    # Minervini Score für AAPL
+    curl -X POST http://localhost:8003/features/minervini \
+      -H "Content-Type: application/json" \
+      -d '{"ticker": "AAPL"}'
+
+    # Minervini Score für NVDA
+    curl -X POST http://localhost:8003/features/minervini \
+      -H "Content-Type: application/json" \
+      -d '{"ticker": "NVDA"}'
+
+
 GET /status
 -----------
 Gibt zurück, ob gerade eine Batch-Berechnung läuft.
@@ -240,8 +316,8 @@ Dateien:
   ERWEITERBARKEIT
 ================================================================================
 
-Das On-the-Fly Interface ist aktuell auf Moving Averages und RS Rating
-beschränkt. Geplante Erweiterungen:
+Das On-the-Fly Interface unterstützt aktuell Moving Averages, RS Rating und
+Minervini Trend Template. Geplante Erweiterungen:
 
   - POST /features/bollinger   → Bollinger Bänder
   - POST /features/stochastic  → Stochastik %K / %D

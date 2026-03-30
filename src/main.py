@@ -63,6 +63,12 @@ class RSRequest(BaseModel):
     benchmark: Optional[str] = None              # e.g. "SPX", None = vs all tickers
     chart_timeframe: str = "1D"                  # source data timeframe
 
+
+class MinerviniRequest(BaseModel):
+    """Request body for on-the-fly Minervini Trend Template calculation."""
+    ticker: str                                  # e.g. "AAPL"
+    chart_timeframe: str = "1D"                  # source data timeframe
+
 # ─── Logging Setup ───────────────────────────────────────────────
 
 GREY = "\033[90m"
@@ -418,6 +424,98 @@ def create_app() -> FastAPI:
             "universe_size": N,
             "skipped_tickers": skipped,
             "interpretation": f"Outperforms {percentile}% of {N} tickers ({skipped} excluded due to insufficient data)",
+        }
+
+    @app.post("/features/minervini")
+    async def calculate_minervini(req: MinerviniRequest):
+        """
+        On-the-fly Minervini Trend Template calculation.
+        Computes all 8 conditions and returns the latest score.
+        """
+        storage = ParquetStorage(DATA_DIR)
+        calculator = TechnicalCalculator()
+
+        try:
+            df = storage.load_ticker_data(req.ticker, req.chart_timeframe)
+        except FileNotFoundError:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"No data found for ticker '{req.ticker}'"},
+            )
+
+        if len(df) < 260:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error": f"Not enough data for '{req.ticker}' "
+                             f"(need >= 260 rows for 52-week analysis, have {len(df)})",
+                },
+            )
+
+        close = df["close"].values
+        high = df["high"].values
+        low = df["low"].values
+
+        # --- Moving Averages ---
+        sma_50 = calculator._get_ma_series(df, "close", 50, FeatureType.SMA).values
+        sma_150 = calculator._get_ma_series(df, "close", 150, FeatureType.SMA).values
+        sma_200 = calculator._get_ma_series(df, "close", 200, FeatureType.SMA).values
+
+        # --- 52-Week High/Low ---
+        high_52w = pd.Series(high).rolling(window=260, min_periods=1).max().values
+        low_52w = pd.Series(low).rolling(window=260, min_periods=1).min().values
+
+        # --- SMA 200 trend (vs 20 days ago) ---
+        sma_200_20ago = np.roll(sma_200, 20)
+        sma_200_20ago[:20] = sma_200[0]
+
+        # --- RS Rating (try to load from pre-computed features) ---
+        rs_rating = None
+        rs_available = False
+        try:
+            df_feat = storage.load_ticker_data(req.ticker, f"{req.chart_timeframe}_features")
+            if "ibd_rs" in df_feat.columns and len(df_feat) > 0:
+                last_rs = df_feat["ibd_rs"].iloc[-1]
+                if not pd.isna(last_rs):
+                    rs_rating = int(last_rs)
+                    rs_available = True
+        except Exception:
+            pass
+
+        # --- Evaluate all 8 conditions (latest row) ---
+        i = -1  # last row
+        conditions = {
+            "1_price_above_sma150_and_sma200": bool(close[i] > sma_150[i] and close[i] > sma_200[i]),
+            "2_sma150_above_sma200": bool(sma_150[i] > sma_200[i]),
+            "3_sma200_trending_up": bool(sma_200[i] > sma_200_20ago[i]),
+            "4_sma50_above_sma150_and_sma200": bool(sma_50[i] > sma_150[i] and sma_50[i] > sma_200[i]),
+            "5_price_above_sma50": bool(close[i] > sma_50[i]),
+            "6_price_30pct_above_52w_low": bool(close[i] >= low_52w[i] * 1.30),
+            "7_price_within_25pct_of_52w_high": bool(close[i] >= high_52w[i] * 0.75),
+            "8_rs_rating_above_70": bool(rs_rating >= 70) if rs_available else None,
+        }
+
+        score = sum(1 for v in conditions.values() if v is True)
+        max_score = 8 if rs_available else 7
+        is_template = score == 8 and rs_available
+
+        return {
+            "ticker": req.ticker,
+            "chart_timeframe": req.chart_timeframe,
+            "score": score,
+            "max_score": max_score,
+            "is_trend_template": is_template,
+            "conditions": conditions,
+            "rs_rating": rs_rating,
+            "rs_available": rs_available,
+            "context": {
+                "close": round(float(close[i]), 2),
+                "sma_50": round(float(sma_50[i]), 2),
+                "sma_150": round(float(sma_150[i]), 2),
+                "sma_200": round(float(sma_200[i]), 2),
+                "high_52w": round(float(high_52w[i]), 2),
+                "low_52w": round(float(low_52w[i]), 2),
+            },
         }
 
     @app.get("/status")

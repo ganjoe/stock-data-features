@@ -9,8 +9,8 @@ services:
       - APP_BASE_DIR=/app
       - FEATURES_API_PORT=8003
     volumes:
-      # Shared config (features.json, settings.json from stock-data-node)
-      - /home/daniel/stock-data-node/config:/app/config
+      # Config (features.json lives here, settings.json via symlink)
+      - /home/daniel/stock-data-features/config:/app/config
       # Shared parquet data (read OHLCV, write *_features.parquet)
       - /home/daniel/stock-data-node/data:/app/data
       # Log files

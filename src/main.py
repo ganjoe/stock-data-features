@@ -1,0 +1,233 @@
+"""
+main.py — Stock Data Features Service
+Standalone FastAPI microservice for calculating technical indicators.
+Triggered via POST /features/calculate from stock-data-node or manually.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import sys
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI, status
+from fastapi.responses import JSONResponse, StreamingResponse
+
+# ─── Bootstrap: ensure src/ is on the path ──────────────────────
+sys.path.insert(0, str(Path(__file__).parent))
+
+from config_parser import FeatureConfigParser, ProcessingContext
+from calculator import TechnicalCalculator
+from parquet_io import ParquetStorage
+from processor import FeatureProcessor
+from job_manager import JobManager
+
+# ─── Logging Setup ───────────────────────────────────────────────
+
+GREY = "\033[90m"
+CYAN = "\033[36m"
+MAGENTA = "\033[35m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+BOLD_RED = "\033[31;1m"
+RESET = "\033[0m"
+
+TICKER_RE = re.compile(r"\b([A-Z]{1,5})\b")
+NUMBER_RE = re.compile(r"(\b\d+(\.\d+)?\b)")
+
+
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        logging.DEBUG: GREY,
+        logging.INFO: RESET,
+        logging.WARNING: YELLOW,
+        logging.ERROR: RED,
+        logging.CRITICAL: BOLD_RED,
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        color = self.COLORS.get(record.levelno, RESET)
+        msg = str(record.msg)
+        if record.args:
+            try:
+                msg = msg % record.args
+            except Exception:
+                pass
+        msg = TICKER_RE.sub(f"{CYAN}\\1{RESET}{color}", msg)
+        msg = NUMBER_RE.sub(f"{MAGENTA}\\1{RESET}{color}", msg)
+        time_str = self.formatTime(record, "%H:%M:%S")
+        level_str = record.levelname.ljust(8)
+        module_str = record.name[:20].ljust(20)
+        if "════" in msg:
+            return f"{color}{msg}{RESET}"
+        return f"{time_str} | {color}{level_str}{RESET} | {GREY}{module_str}{RESET} | {color}{msg}{RESET}"
+
+
+def configure_logging(log_dir: str) -> None:
+    log_dir_path = Path(log_dir)
+    log_dir_path.mkdir(parents=True, exist_ok=True)
+
+    fmt = "%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s"
+    datefmt = "%d.%m.%Y %H:%M:%S"
+    formatter = logging.Formatter(fmt, datefmt=datefmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.DEBUG)
+    stream_handler.setFormatter(ColoredFormatter())
+    root.addHandler(stream_handler)
+
+    file_handler = logging.FileHandler(log_dir_path / "error.log", encoding="utf-8")
+    file_handler.setLevel(logging.ERROR)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+
+# ─── Config ──────────────────────────────────────────────────────
+
+logger = logging.getLogger(__name__)
+
+BASE_DIR = Path(os.environ.get("APP_BASE_DIR", Path(__file__).parent.parent))
+CONFIG_DIR = str(BASE_DIR / "config")
+LOG_DIR = str(BASE_DIR / "logs")
+DATA_DIR = str(BASE_DIR / "data" / "parquet")
+API_PORT = int(os.environ.get("FEATURES_API_PORT", "8003"))
+
+
+def _load_settings() -> dict:
+    """Load settings.json for processing_threads etc."""
+    settings_path = Path(CONFIG_DIR) / "settings.json"
+    if settings_path.exists():
+        with open(settings_path, "r") as f:
+            return json.load(f)
+    return {}
+
+
+# ─── Feature Pipeline Runner ────────────────────────────────────
+
+def run_feature_pipeline() -> None:
+    """Runs the full feature calculation pipeline (blocking)."""
+    config_parser = FeatureConfigParser(str(Path(CONFIG_DIR) / "features.json"))
+    features = config_parser.parse()
+
+    if not features:
+        logger.info("ℹ️  No features defined in features.json. Skipping.")
+        return
+
+    settings = _load_settings()
+    thread_count = settings.get("processing_threads", 4)
+
+    ctx = ProcessingContext(
+        thread_count=thread_count,
+        data_dir=DATA_DIR,
+        timeframes=["1D"],
+        features=features,
+    )
+
+    storage = ParquetStorage(ctx.data_dir)
+    tickers = storage.get_available_tickers()
+
+    if not tickers:
+        logger.info("ℹ️  No data available yet. Skipping feature calculation.")
+        return
+
+    logger.info(
+        "▶️  Calculating features for %d ticker(s) with %d thread(s)...",
+        len(tickers),
+        ctx.thread_count,
+    )
+
+    calculator = TechnicalCalculator()
+    processor = FeatureProcessor(ctx, storage, calculator)
+    results = processor.process_all_tickers(tickers)
+    success_count = sum(1 for r in results if r.success)
+    logger.info("✅ Feature calculation finished: %d/%d successful", success_count, len(results))
+
+
+# ─── FastAPI App ─────────────────────────────────────────────────
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="Stock Data Features API",
+        description="Technical indicator calculation service.",
+        version="1.0.0",
+    )
+
+    job_manager = JobManager()
+
+    @app.post("/features/calculate")
+    async def trigger_feature_calculation(stream: bool = False):
+        """
+        Triggers the feature calculation process.
+        Returns 202 if started, 409 if already running. (F-API-010, F-SYS-030)
+        If stream=True, returns a StreamingResponse with real-time logs.
+        """
+        if stream:
+            return StreamingResponse(
+                job_manager.stream_feature_calculation(run_feature_pipeline),
+                media_type="text/plain",
+            )
+
+        success = job_manager.start_feature_calculation(run_feature_pipeline)
+
+        if success:
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content={
+                    "status": "Job started in background",
+                    "hint": "Use ?stream=true to see real-time log output",
+                },
+            )
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={
+                    "status": "Ignored",
+                    "detail": "A feature calculation process is already running.",
+                },
+            )
+
+    @app.get("/status")
+    async def get_status() -> dict:
+        """Returns whether a feature calculation is currently running."""
+        return {"is_running": job_manager.is_running}
+
+    @app.get("/health")
+    async def health_check() -> dict:
+        """Simple liveness probe for Docker health checks."""
+        return {"status": "ok"}
+
+    return app
+
+
+# ─── Entrypoint ──────────────────────────────────────────────────
+
+def main() -> None:
+    configure_logging(LOG_DIR)
+
+    logger.info("═══════════════════════════════════════════════════════════════")
+    logger.info("  Stock Data Features Service — starting up")
+    logger.info("═══════════════════════════════════════════════════════════════")
+    logger.info("ℹ️  Config dir: %s", CONFIG_DIR)
+    logger.info("ℹ️  Data dir:   %s", DATA_DIR)
+    logger.info("ℹ️  API port:   %d", API_PORT)
+
+    app = create_app()
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=API_PORT,
+        log_level="warning",
+    )
+
+
+if __name__ == "__main__":
+    main()

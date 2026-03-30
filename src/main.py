@@ -14,6 +14,9 @@ from pathlib import Path
 
 from typing import Optional
 
+import numpy as np
+import pandas as pd
+
 import uvicorn
 from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -52,6 +55,13 @@ class MARequest(BaseModel):
         if v < 1 or v > 500:
             raise ValueError(f"ma_window must be between 1 and 500, got {v}")
         return v
+
+
+class RSRequest(BaseModel):
+    """Request body for on-the-fly RS Rating calculation."""
+    ticker: str                                  # e.g. "AAPL"
+    benchmark: Optional[str] = None              # e.g. "SPX", None = vs all tickers
+    chart_timeframe: str = "1D"                  # source data timeframe
 
 # ─── Logging Setup ───────────────────────────────────────────────
 
@@ -270,6 +280,104 @@ def create_app() -> FastAPI:
             "timestamps": timestamps,
             "close": closes,
             "values": ma_values,
+        }
+
+    @app.post("/features/rs")
+    async def calculate_rs_rating(req: RSRequest):
+        """
+        On-the-fly RS Rating calculation.
+        - Without benchmark: cross-sectional percentile rank (1-99) vs all tickers.
+        - With benchmark:    relative strength of ticker vs benchmark ticker.
+        Returns the most recent value.
+        """
+
+        storage = ParquetStorage(DATA_DIR)
+
+        # 1. Load ticker data
+        try:
+            df_ticker = storage.load_ticker_data(req.ticker, req.chart_timeframe)
+        except FileNotFoundError:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"No data found for ticker '{req.ticker}'"},
+            )
+
+        if len(df_ticker) < 63:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": f"Not enough data for '{req.ticker}' (need >= 63 rows, have {len(df_ticker)})"},
+            )
+
+        def _compute_raw_roc(close: "pd.Series") -> float:
+            """IBD-style weighted ROC score from a close price series."""
+            roc_63 = close.pct_change(periods=63) * 100
+            roc_126 = close.pct_change(periods=126) * 100
+            roc_189 = close.pct_change(periods=189) * 100
+            roc_252 = close.pct_change(periods=252) * 100
+            for s in (roc_63, roc_126, roc_189, roc_252):
+                s.replace([np.inf, -np.inf], np.nan, inplace=True)
+                s.fillna(0, inplace=True)
+            raw = (2 * roc_63) + roc_126 + roc_189 + roc_252
+            return float(raw.iloc[-1])
+
+        # ── Mode A: vs specific benchmark ticker ──────────────────
+        if req.benchmark is not None:
+            try:
+                df_bench = storage.load_ticker_data(req.benchmark, req.chart_timeframe)
+            except FileNotFoundError:
+                return JSONResponse(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    content={"error": f"No data found for benchmark '{req.benchmark}'"},
+                )
+
+            ticker_raw = _compute_raw_roc(df_ticker["close"])
+            bench_raw = _compute_raw_roc(df_bench["close"])
+
+            # Relative strength: difference of weighted ROC scores
+            rs_relative = round(ticker_raw - bench_raw, 4)
+
+            return {
+                "ticker": req.ticker,
+                "benchmark": req.benchmark,
+                "mode": "vs_benchmark",
+                "ticker_raw_score": round(ticker_raw, 4),
+                "benchmark_raw_score": round(bench_raw, 4),
+                "rs_relative": rs_relative,
+                "interpretation": "positive = ticker outperforms benchmark",
+            }
+
+        # ── Mode B: vs all tickers (cross-sectional rank) ─────────
+        all_tickers = storage.get_available_tickers()
+        raw_scores: dict[str, float] = {}
+
+        for t in all_tickers:
+            try:
+                df_t = storage.load_ticker_data(t, req.chart_timeframe)
+                if len(df_t) >= 63:
+                    raw_scores[t] = _compute_raw_roc(df_t["close"])
+            except Exception:
+                continue
+
+        if req.ticker not in raw_scores:
+            raw_scores[req.ticker] = _compute_raw_roc(df_ticker["close"])
+
+        N = len(raw_scores)
+        if N <= 1:
+            percentile = 50
+        else:
+            scores_series = pd.Series(raw_scores)
+            ranks = scores_series.rank()
+            percentile = int(round(((ranks[req.ticker] - 1) / (N - 1)) * 98 + 1))
+            percentile = max(1, min(99, percentile))
+
+        return {
+            "ticker": req.ticker,
+            "benchmark": None,
+            "mode": "vs_all",
+            "rs_rating": percentile,
+            "raw_score": round(raw_scores[req.ticker], 4),
+            "universe_size": N,
+            "interpretation": f"Outperforms {percentile}% of {N} tickers",
         }
 
     @app.get("/status")

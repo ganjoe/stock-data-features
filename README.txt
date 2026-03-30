@@ -14,10 +14,11 @@ zwei Berechnungsmodi bereit:
                     Minervini Score). Wird von stock-data-node nach jedem
                     Download-Zyklus automatisch getriggert.
 
-  2. ON-THE-FLY:    Berechnet einen einzelnen Moving Average für einen
-                    einzelnen Ticker in Echtzeit und gibt das Ergebnis
-                    direkt als JSON zurück. Für Dashboard-Frontends gedacht,
-                    die dynamische MA-Overlays brauchen.
+  2. ON-THE-FLY:    Berechnet einzelne Indikatoren für einzelne Ticker in
+                    Echtzeit und gibt das Ergebnis direkt als JSON zurück.
+                    Aktuell unterstützt:
+                      - Moving Averages (SMA, EMA)    via POST /features/ma
+                      - RS Rating (IBD-Methode)       via POST /features/rs
 
 
 Programmablauf
@@ -28,7 +29,8 @@ Programmablauf
   FastAPI startet auf Port 8003
        │
        ├── Wartet auf POST /features/calculate    (Batch von stock-data-node)
-       ├── Wartet auf POST /features/ma           (On-the-Fly von Frontends)
+       ├── Wartet auf POST /features/ma           (On-the-Fly MA)
+       ├── Wartet auf POST /features/rs           (On-the-Fly RS Rating)
        ├── GET /health                            (Docker Healthcheck)
        └── GET /status                            (Job-Status abfragen)
 
@@ -44,6 +46,21 @@ Bei einem On-the-Fly-Aufruf (/features/ma):
   1. Der OHLCV-Parquet des angegebenen Tickers wird geladen
   2. Der angeforderte Moving Average (SMA oder EMA) wird berechnet
   3. Das Ergebnis wird als JSON-Array direkt zurückgegeben (kein Schreiben)
+
+Bei einem On-the-Fly RS-Rating-Aufruf (/features/rs):
+  Modus A — vs Benchmark (z.B. "AAPL vs SPX"):
+    1. OHLCV-Daten für Ticker und Benchmark werden geladen
+    2. Für beide wird der gewichtete ROC-Score berechnet (IBD-Methode):
+       raw = (2 × ROC_63) + ROC_126 + ROC_189 + ROC_252
+    3. Die Differenz (Ticker - Benchmark) wird zurückgegeben
+       → Positiv = Ticker outperformt, Negativ = Benchmark stärker
+
+  Modus B — vs alle Ticker (kein Benchmark angegeben):
+    1. OHLCV-Daten für ALLE Ticker im Parquet-Verzeichnis werden geladen
+    2. Für jeden Ticker wird der gewichtete ROC-Score berechnet
+    3. Der angefragte Ticker wird im Cross-Sectional-Ranking eingestuft
+    4. Ein Perzentilwert (1-99) wird zurückgegeben
+       → 99 = stärkster Ticker, 1 = schwächster
 
 
 ================================================================================
@@ -120,6 +137,72 @@ Berechnet on-the-fly einen Moving Average für einen einzelnen Ticker.
       -d '{"ticker": "TSLA", "ma_type": "sma", "chart_timeframe": "1W", "ma_window": 200}'
 
 
+POST /features/rs
+------------------
+Berechnet on-the-fly das IBD RS Rating für einen einzelnen Ticker.
+Zwei Modi je nachdem ob ein Benchmark angegeben wird.
+
+  Request Body (JSON):
+    {
+      "ticker":           "AAPL",         (string, Pflicht)  Ticker-Symbol
+      "benchmark":        "SPX",          (string, Optional) Benchmark-Ticker, Default: null
+      "chart_timeframe":  "1D"            (string, Optional) Quell-Timeframe, Default: "1D"
+    }
+
+  Modus A — Mit Benchmark (Response 200 OK):
+    {
+      "ticker":               "AAPL",
+      "benchmark":            "SPX",
+      "mode":                 "vs_benchmark",
+      "ticker_raw_score":     185.4321,
+      "benchmark_raw_score":  120.1234,
+      "rs_relative":          65.3087,
+      "interpretation":       "positive = ticker outperforms benchmark"
+    }
+
+  Modus B — Ohne Benchmark = vs alle Ticker (Response 200 OK):
+    {
+      "ticker":               "AAPL",
+      "benchmark":            null,
+      "mode":                 "vs_all",
+      "rs_rating":            87,
+      "raw_score":            185.4321,
+      "universe_size":        1450,
+      "interpretation":       "Outperforms 87% of 1450 tickers"
+    }
+
+  Response (404 Not Found):
+    {
+      "error": "No data found for ticker 'XYZ'"
+    }
+    oder:
+    {
+      "error": "No data found for benchmark 'INVALID'"
+    }
+
+  Response (400 Bad Request):
+    {
+      "error": "Not enough data for 'XYZ' (need >= 63 rows, have 10)"
+    }
+
+  Beispiele:
+
+    # RS Rating von AAPL vs alle Ticker (Cross-Sectional Rank)
+    curl -X POST http://localhost:8003/features/rs \
+      -H "Content-Type: application/json" \
+      -d '{"ticker": "AAPL"}'
+
+    # RS Rating von AAPL vs SPX (Benchmark-Vergleich)
+    curl -X POST http://localhost:8003/features/rs \
+      -H "Content-Type: application/json" \
+      -d '{"ticker": "AAPL", "benchmark": "SPX"}'
+
+    # RS Rating von MSFT vs QQQ
+    curl -X POST http://localhost:8003/features/rs \
+      -H "Content-Type: application/json" \
+      -d '{"ticker": "MSFT", "benchmark": "QQQ"}'
+
+
 GET /status
 -----------
 Gibt zurück, ob gerade eine Batch-Berechnung läuft.
@@ -157,7 +240,7 @@ Dateien:
   ERWEITERBARKEIT
 ================================================================================
 
-Das On-the-Fly Interface (/features/ma) ist aktuell auf Moving Averages
+Das On-the-Fly Interface ist aktuell auf Moving Averages und RS Rating
 beschränkt. Geplante Erweiterungen:
 
   - POST /features/bollinger   → Bollinger Bänder

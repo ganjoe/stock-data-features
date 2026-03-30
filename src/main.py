@@ -308,17 +308,37 @@ def create_app() -> FastAPI:
                 content={"error": f"Not enough data for '{req.ticker}' (need >= 63 rows, have {len(df_ticker)})"},
             )
 
-        def _compute_raw_roc(close: "pd.Series") -> float:
-            """IBD-style weighted ROC score from a close price series."""
-            roc_63 = close.pct_change(periods=63) * 100
-            roc_126 = close.pct_change(periods=126) * 100
-            roc_189 = close.pct_change(periods=189) * 100
-            roc_252 = close.pct_change(periods=252) * 100
-            for s in (roc_63, roc_126, roc_189, roc_252):
-                s.replace([np.inf, -np.inf], np.nan, inplace=True)
-                s.fillna(0, inplace=True)
-            raw = (2 * roc_63) + roc_126 + roc_189 + roc_252
-            return float(raw.iloc[-1])
+        # Periods and their IBD weights
+        PERIODS_WEIGHTS = [(63, 2), (126, 1), (189, 1), (252, 1)]
+        FULL_WEIGHT_SUM = 5  # 2+1+1+1
+
+        def _compute_normalized_roc(close: "pd.Series") -> tuple:
+            """
+            IBD-style weighted ROC score with normalization.
+            Returns (normalized_score, num_components, data_length).
+            Only uses ROC components for which sufficient data exists.
+            The score is scaled to a full 5-weight basis.
+            """
+            n = len(close)
+            weighted_sum = 0.0
+            used_weight = 0
+            components_used = 0
+
+            for period, weight in PERIODS_WEIGHTS:
+                if n > period:
+                    p_now = close.iloc[-1]
+                    p_then = close.iloc[-period - 1]
+                    if p_then != 0 and not np.isnan(p_then) and not np.isnan(p_now):
+                        roc = ((p_now - p_then) / p_then) * 100
+                        weighted_sum += roc * weight
+                        used_weight += weight
+                        components_used += 1
+
+            if used_weight == 0:
+                return 0.0, 0, n
+
+            normalized = weighted_sum * (FULL_WEIGHT_SUM / used_weight)
+            return round(normalized, 4), components_used, n
 
         # ── Mode A: vs specific benchmark ticker ──────────────────
         if req.benchmark is not None:
@@ -330,18 +350,25 @@ def create_app() -> FastAPI:
                     content={"error": f"No data found for benchmark '{req.benchmark}'"},
                 )
 
-            ticker_raw = _compute_raw_roc(df_ticker["close"])
-            bench_raw = _compute_raw_roc(df_bench["close"])
+            if len(df_bench) < 63:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": f"Not enough data for benchmark '{req.benchmark}' (need >= 63, have {len(df_bench)})"},
+                )
 
-            # Relative strength: difference of weighted ROC scores
+            ticker_raw, ticker_comp, _ = _compute_normalized_roc(df_ticker["close"])
+            bench_raw, bench_comp, _ = _compute_normalized_roc(df_bench["close"])
+
             rs_relative = round(ticker_raw - bench_raw, 4)
 
             return {
                 "ticker": req.ticker,
                 "benchmark": req.benchmark,
                 "mode": "vs_benchmark",
-                "ticker_raw_score": round(ticker_raw, 4),
-                "benchmark_raw_score": round(bench_raw, 4),
+                "ticker_raw_score": ticker_raw,
+                "ticker_components": ticker_comp,
+                "benchmark_raw_score": bench_raw,
+                "benchmark_components": bench_comp,
                 "rs_relative": rs_relative,
                 "interpretation": "positive = ticker outperforms benchmark",
             }
@@ -349,17 +376,27 @@ def create_app() -> FastAPI:
         # ── Mode B: vs all tickers (cross-sectional rank) ─────────
         all_tickers = storage.get_available_tickers()
         raw_scores: dict[str, float] = {}
+        skipped = 0
 
         for t in all_tickers:
             try:
                 df_t = storage.load_ticker_data(t, req.chart_timeframe)
                 if len(df_t) >= 63:
-                    raw_scores[t] = _compute_raw_roc(df_t["close"])
+                    score, comp, _ = _compute_normalized_roc(df_t["close"])
+                    if comp > 0:
+                        raw_scores[t] = score
+                    else:
+                        skipped += 1
+                else:
+                    skipped += 1
             except Exception:
+                skipped += 1
                 continue
 
         if req.ticker not in raw_scores:
-            raw_scores[req.ticker] = _compute_raw_roc(df_ticker["close"])
+            score, comp, _ = _compute_normalized_roc(df_ticker["close"])
+            if comp > 0:
+                raw_scores[req.ticker] = score
 
         N = len(raw_scores)
         if N <= 1:
@@ -370,14 +407,17 @@ def create_app() -> FastAPI:
             percentile = int(round(((ranks[req.ticker] - 1) / (N - 1)) * 98 + 1))
             percentile = max(1, min(99, percentile))
 
+        ticker_score = raw_scores.get(req.ticker, 0.0)
+
         return {
             "ticker": req.ticker,
             "benchmark": None,
             "mode": "vs_all",
             "rs_rating": percentile,
-            "raw_score": round(raw_scores[req.ticker], 4),
+            "raw_score": ticker_score,
             "universe_size": N,
-            "interpretation": f"Outperforms {percentile}% of {N} tickers",
+            "skipped_tickers": skipped,
+            "interpretation": f"Outperforms {percentile}% of {N} tickers ({skipped} excluded due to insufficient data)",
         }
 
     @app.get("/status")

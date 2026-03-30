@@ -111,16 +111,27 @@ class FeatureProcessor:
                 
                 # Cross-sectional ranking per row (date)
                 # Formula for percentile: (rank - 1) / (N - 1) * 98 + 1
-                # Where rank is 1 to N. This maps rank 1 to 1, and rank N to 99.
-                # If N=1, just assign 50.
+                # Where rank is 1 to N, and N is the number of tickers WITH DATA for that date.
+                # NaN values are excluded from ranking (na_option='keep').
                 
-                N = len(central_df.columns)
-                if N <= 1:
-                    rating_df = pd.DataFrame(50, index=central_df.index, columns=central_df.columns)
-                else:
-                    # rank(method='average') returns ranks 1 to N
-                    rank_df = central_df.rank(axis=1, na_option='bottom')
-                    rating_df = ((rank_df - 1) / (N - 1) * 98 + 1).round().clip(1, 99).astype("Int64")
+                # Dynamic N per row: only count non-NaN values
+                N_per_row = central_df.notna().sum(axis=1)
+                
+                # Rank only non-NaN values; NaN stays NaN
+                rank_df = central_df.rank(axis=1, na_option='keep')
+                
+                # Build rating: (rank - 1) / (N - 1) * 98 + 1, clipped to [1, 99]
+                # For rows where N <= 1, assign 50
+                N_minus_1 = (N_per_row - 1).clip(lower=1)
+                rating_df = ((rank_df.sub(1)).div(N_minus_1, axis=0) * 98 + 1)
+                rating_df = rating_df.round().clip(1, 99)
+                
+                # Where N <= 1, override to 50
+                single_ticker_rows = N_per_row <= 1
+                if single_ticker_rows.any():
+                    rating_df.loc[single_ticker_rows] = 50
+                
+                rating_df = rating_df.astype("Int64")
                 
                 logger.info(f"⚙️  Injecting cross-sectional feature '{target_col}' into {len(central_df.columns)} tickers for timeframe {tf}...")
                 

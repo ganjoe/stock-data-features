@@ -122,32 +122,54 @@ class TechnicalCalculator:
         return df
 
     def _calc_ibd_rs_raw(self, df: pd.DataFrame, config: FeatureConfig) -> pd.DataFrame:
-        """Calculates the raw ROC score for IBD RS rating."""
-        if len(df) < 1:
-            df[f"{config.feature_id}_raw"] = 0.0
+        """
+        Calculates the normalized weighted ROC score for IBD RS rating.
+        
+        Uses weighted normalization: only ROC components for which enough
+        data exists are computed. The result is scaled to a full 5-weight
+        basis (2+1+1+1) so that short-history tickers are not penalized
+        by having missing components set to 0.
+        
+        Rows with < 63 data points get NaN (excluded from cross-sectional ranking).
+        """
+        n_rows = len(df)
+        if n_rows < 1:
+            df[f"{config.feature_id}_raw"] = np.nan
             return df
+
+        close = df['close']
+        
+        # Define ROC periods and their IBD weights
+        periods_weights = [(63, 2), (126, 1), (189, 1), (252, 1)]
+        full_weight_sum = sum(w for _, w in periods_weights)  # = 5
+        
+        # Compute each ROC component, leave NaN where insufficient data
+        roc_components = []
+        for period, weight in periods_weights:
+            roc = close.pct_change(periods=period) * 100
+            # Replace inf (from P=0 division) with NaN — NOT 0
+            roc = roc.replace([np.inf, -np.inf], np.nan)
+            roc_components.append((roc, weight))
+        
+        # Build weighted sum row by row, normalizing by available weights
+        raw_scores = pd.Series(np.nan, index=df.index, dtype=float)
+        
+        for i in range(n_rows):
+            available_sum = 0.0
+            available_weight = 0
             
-        # P_Heute = Aktie.Schlusskurs[Heute]
-        # P_N = Aktie.Schlusskurs[Vor_N_Tagen]
-        # ROC_N = ((P_Heute - P_N) / P_N) * 100
-        # pandas pct_change(periods=N) * 100 computes exactly this.
+            for roc, weight in roc_components:
+                val = roc.iloc[i]
+                if not np.isnan(val):
+                    available_sum += val * weight
+                    available_weight += weight
+            
+            if available_weight > 0:
+                # Normalize to full weight basis (5) so scores are comparable
+                raw_scores.iloc[i] = available_sum * (full_weight_sum / available_weight)
+            # else: stays NaN → excluded from cross-sectional ranking
         
-        roc_63 = df['close'].pct_change(periods=63) * 100
-        roc_126 = df['close'].pct_change(periods=126) * 100
-        roc_189 = df['close'].pct_change(periods=189) * 100
-        roc_252 = df['close'].pct_change(periods=252) * 100
-        
-        # Use fillna(0) and replace inf (from zero prices) with 0.0
-        # F-FEA-050: Robustness against P=0
-        roc_63 = roc_63.replace([np.inf, -np.inf], np.nan).fillna(0)
-        roc_126 = roc_126.fillna(0).replace([np.inf, -np.inf], 0)
-        roc_189 = roc_189.fillna(0).replace([np.inf, -np.inf], 0)
-        roc_252 = roc_252.fillna(0).replace([np.inf, -np.inf], 0)
-        
-        raw_score = (2 * roc_63) + roc_126 + roc_189 + roc_252
-        
-        # We append '_raw' because processor.py will pull this out and compute the cross-sectional rank
-        df[f"{config.feature_id}_raw"] = raw_score.values
+        df[f"{config.feature_id}_raw"] = raw_scores.values
         return df
 
     def _calc_minervini_trend(self, df: pd.DataFrame, config: FeatureConfig) -> pd.DataFrame:
@@ -193,36 +215,16 @@ class TechnicalCalculator:
         high_52w = calc_df_52w['high'].rolling(window=260).max().iloc[259:].reset_index(drop=True).values
         low_52w = calc_df_52w['low'].rolling(window=260).min().iloc[259:].reset_index(drop=True).values
         
-        # IBD RS Rating verwenden (bereits als ibd_rs_raw Spalte vorhanden)
-        # Falls noch nicht berechnet, berechne es hier als Fallback
-        if 'ibd_rs_raw' in df.columns:
-            rs_rating = df['ibd_rs_raw'].values
+        # IBD RS Rating: Use the cross-sectional rank computed by processor.py
+        # The column 'ibd_rs' (1-99 percentile) is injected back into the
+        # _features.parquet by the batch pipeline. If not available (e.g. first
+        # run or standalone calculation), condition 8 cannot be evaluated and
+        # is treated as not met (conservative approach).
+        if 'ibd_rs' in df.columns:
+            rs_rating_ranked = df['ibd_rs'].fillna(0).values.astype(float)
         else:
-            # Fallback-Berechnung von RS Rating (IBD Methode)
-            roc_63 = df['close'].pct_change(periods=63) * 100
-            roc_126 = df['close'].pct_change(periods=126) * 100
-            roc_189 = df['close'].pct_change(periods=189) * 100
-            roc_252 = df['close'].pct_change(periods=252) * 100
-            
-            # Robustness against inf values
-            roc_63 = roc_63.replace([np.inf, -np.inf], np.nan).fillna(0)
-            roc_126 = roc_126.replace([np.inf, -np.inf], np.nan).fillna(0)
-            roc_189 = roc_189.replace([np.inf, -np.inf], np.nan).fillna(0)
-            roc_252 = roc_252.replace([np.inf, -np.inf], np.nan).fillna(0)
-            
-            raw_score = (2 * roc_63) + roc_126 + roc_189 + roc_252
-            rs_rating = raw_score.values
-        
-        # Cross-sectional Ranking für RS Rating anwenden (über alle Ticker)
-        # Dies ist eine vereinfachte Berechnung - das eigentliche cross-sectional Ranking
-        # erfolgt im processor.py über alle Ticker hinweg. Hier verwenden wir den Rohwert
-        # als Platzhalter, da Minervini typischerweise zusammen mit IBD_RS berechnet wird.
-        N = len(rs_rating)
-        if N > 1:
-            rank_df = pd.DataFrame({'rs': rs_rating}).rank(axis=0, na_option='bottom')
-            rs_rating_ranked = ((rank_df['rs'] - 1) / (N - 1) * 98 + 1).round().clip(1, 99).astype(float).values
-        else:
-            rs_rating_ranked = np.full(N, 50.0)
+            # No cross-sectional RS available → condition 8 = not met
+            rs_rating_ranked = np.zeros(len(df), dtype=float)
         
         aktueller_preis = df['close'].values
         

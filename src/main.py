@@ -12,18 +12,46 @@ import re
 import sys
 from pathlib import Path
 
+from typing import Optional
+
 import uvicorn
 from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, field_validator
 
 # ─── Bootstrap: ensure src/ is on the path ──────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config_parser import FeatureConfigParser, ProcessingContext
+from config_parser import FeatureConfigParser, FeatureConfig, FeatureType, ProcessingContext
 from calculator import TechnicalCalculator
 from parquet_io import ParquetStorage
 from processor import FeatureProcessor
 from job_manager import JobManager
+
+
+# ─── Request Models ──────────────────────────────────────────────
+
+class MARequest(BaseModel):
+    """Request body for on-the-fly moving average calculation."""
+    ticker: str                          # e.g. "AAPL"
+    ma_type: str                         # "sma" or "ema"
+    chart_timeframe: str = "1D"          # source data timeframe, e.g. "1D"
+    ma_window: int                       # MA period, e.g. 50
+
+    @field_validator("ma_type")
+    @classmethod
+    def validate_ma_type(cls, v: str) -> str:
+        v = v.upper()
+        if v not in ("SMA", "EMA"):
+            raise ValueError(f"ma_type must be 'sma' or 'ema', got '{v}'")
+        return v
+
+    @field_validator("ma_window")
+    @classmethod
+    def validate_window(cls, v: int) -> int:
+        if v < 1 or v > 500:
+            raise ValueError(f"ma_window must be between 1 and 500, got {v}")
+        return v
 
 # ─── Logging Setup ───────────────────────────────────────────────
 
@@ -193,6 +221,56 @@ def create_app() -> FastAPI:
                     "detail": "A feature calculation process is already running.",
                 },
             )
+
+    @app.post("/features/ma")
+    async def calculate_moving_average(req: MARequest):
+        """
+        On-the-fly moving average calculation for a single ticker.
+        Loads OHLCV data, computes the requested MA, returns JSON arrays.
+        """
+        storage = ParquetStorage(DATA_DIR)
+        calculator = TechnicalCalculator()
+
+        # 1. Load source data
+        try:
+            df = storage.load_ticker_data(req.ticker, req.chart_timeframe)
+        except FileNotFoundError:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "error": f"No data found for ticker '{req.ticker}' "
+                             f"with timeframe '{req.chart_timeframe}'",
+                },
+            )
+
+        if df.empty:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"Data for '{req.ticker}' is empty"},
+            )
+
+        # 2. Calculate MA using existing calculator engine
+        ma_type_enum = FeatureType.EMA if req.ma_type == "EMA" else FeatureType.SMA
+        ma_series = calculator._get_ma_series(df, "close", req.ma_window, ma_type_enum)
+
+        # 3. Build response — only timestamp, close, and the computed MA
+        timestamps = df["timestamp"].tolist()
+        closes = df["close"].tolist()
+        ma_values = ma_series.tolist()
+
+        ma_label = f"{req.ma_type.lower()}_{req.ma_window}"
+
+        return {
+            "ticker": req.ticker,
+            "chart_timeframe": req.chart_timeframe,
+            "ma_type": req.ma_type,
+            "ma_window": req.ma_window,
+            "ma_label": ma_label,
+            "data_points": len(timestamps),
+            "timestamps": timestamps,
+            "close": closes,
+            "values": ma_values,
+        }
 
     @app.get("/status")
     async def get_status() -> dict:

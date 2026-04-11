@@ -176,10 +176,28 @@ def run_feature_pipeline() -> None:
     )
 
     storage = ParquetStorage(ctx.data_dir)
-    tickers = storage.get_available_tickers()
+    raw_tickers = storage.get_available_tickers()
+
+    if not raw_tickers:
+        logger.info("ℹ️  No data available yet. Skipping feature calculation.")
+        return
+
+    # Pre-filter to exclude tickers missing the required parquet files
+    # This avoids spawning processes just to catch FileNotFoundError
+    valid_tickers = []
+    base_dir = Path(ctx.data_dir)
+    for t in raw_tickers:
+        if all((base_dir / t / f"{tf}.parquet").exists() for tf in ctx.timeframes):
+            valid_tickers.append(t)
+            
+    skipped = len(raw_tickers) - len(valid_tickers)
+    if skipped > 0:
+        logger.info("ℹ️  Skipped %d tickers without complete source files.", skipped)
+        
+    tickers = valid_tickers
 
     if not tickers:
-        logger.info("ℹ️  No data available yet. Skipping feature calculation.")
+        logger.info("ℹ️  No valid tickers with data found. Skipping.")
         return
 
     logger.info(

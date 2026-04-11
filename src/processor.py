@@ -1,8 +1,9 @@
 import logging
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from typing import List, Optional, Dict
 import pandas as pd
+import multiprocessing
 from dataclasses import dataclass
 
 from config_parser import FeatureConfig, ProcessingContext
@@ -38,9 +39,10 @@ class FeatureProcessor:
         completed = 0
         last_logged_pct = 0
         
-        # Parallel execution on Ticker level (ThreadPool: no pickle overhead,
-        # pandas/numpy C-extensions release the GIL for true parallelism)
-        with ThreadPoolExecutor(max_workers=self.context.thread_count) as executor:
+        # Parallel execution on Ticker level (ProcessPool: true parallelism, avoids GIL,
+        # using spawn context to avoid deadlocks with FastAPI background threads)
+        ctx = multiprocessing.get_context('spawn')
+        with ProcessPoolExecutor(max_workers=self.context.thread_count, mp_context=ctx) as executor:
             future_to_ticker = {executor.submit(self._process_single_ticker, ticker): ticker for ticker in tickers}
             
             for future in as_completed(future_to_ticker):

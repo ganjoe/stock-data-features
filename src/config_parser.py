@@ -11,6 +11,7 @@ class FeatureType(str, Enum):
     STOCHASTIC = "STOCHASTIC"
     IBD_RS = "IBD_RS"
     MINERVINI_TREND = "MINERVINI_TREND"
+    BREADTH_MINERVINI = "BREADTH_MINERVINI"
     UNKNOWN = "UNKNOWN"
 
 @dataclass
@@ -45,7 +46,7 @@ class FeatureConfigParser:
         features = data.get("features", {})
         configs = []
         
-        visual_keys = {'color', 'style', 'pane', 'chart_type', 'thickness', 'mode'}
+        visual_keys = {'color', 'style', 'pane', 'chart_type', 'thickness'}
         
         for feature_id, params in features.items():
             f_type_str = params.get("type", "UNKNOWN")

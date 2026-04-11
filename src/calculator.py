@@ -172,6 +172,44 @@ class TechnicalCalculator:
         df[f"{config.feature_id}_raw"] = raw_scores.values
         return df
 
+    def _calc_breadth_minervini_raw(self, df: pd.DataFrame, config: FeatureConfig) -> pd.DataFrame:
+        """
+        Calculates the 7 Minervini conditions (without RS Rating) and saves a binary
+        column if all 7 conditions are met. Used for aggregated market breadth.
+        """
+        if len(df) < 260:
+            df[f"{config.feature_id}_raw"] = 0
+            return df
+            
+        sma_50 = self._get_ma_series(df, 'close', 50, FeatureType.SMA).values
+        sma_150 = self._get_ma_series(df, 'close', 150, FeatureType.SMA).values
+        sma_200 = self._get_ma_series(df, 'close', 200, FeatureType.SMA).values
+        
+        sma_200_vor_20 = np.roll(sma_200, 20)
+        sma_200_vor_20[:20] = sma_200[:1]
+        
+        first_row = df.iloc[[0]]
+        prepended = pd.concat([first_row] * 259, ignore_index=True)
+        calc_df_52w = pd.concat([prepended, df], ignore_index=True)
+        
+        high_52w = calc_df_52w['high'].rolling(window=260).max().iloc[259:].reset_index(drop=True).values
+        low_52w = calc_df_52w['low'].rolling(window=260).min().iloc[259:].reset_index(drop=True).values
+        
+        aktueller_preis = df['close'].values
+        score = np.zeros(len(df), dtype=int)
+        
+        score += ((aktueller_preis > sma_150) & (aktueller_preis > sma_200)).astype(int)
+        score += (sma_150 > sma_200).astype(int)
+        score += (sma_200 > sma_200_vor_20).astype(int)
+        score += ((sma_50 > sma_150) & (sma_50 > sma_200)).astype(int)
+        score += (aktueller_preis > sma_50).astype(int)
+        score += (aktueller_preis >= (low_52w * 1.30)).astype(int)
+        score += (aktueller_preis >= (high_52w * 0.75)).astype(int)
+        
+        # 1 if all 7 conditions are met, otherwise 0
+        df[f"{config.feature_id}_raw"] = (score == 7).astype(int)
+        return df
+
     def _calc_minervini_trend(self, df: pd.DataFrame, config: FeatureConfig) -> pd.DataFrame:
         """
         Berechnet den Minervini Trend Template Score basierend auf 8 Kriterien.

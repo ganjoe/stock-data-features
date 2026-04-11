@@ -148,6 +148,30 @@
             "pane": "abs",
             "chart_type": "line",
             "thickness": 1
+        },
+        "breadth_minervini": {
+            "window": 1,
+            "period": "D",
+            "type": "BREADTH_MINERVINI",
+            "aggregation": "all",
+            "color": "magenta",
+            "mode": "absolute",
+            "style": "solid",
+            "pane": "abs",
+            "chart_type": "line",
+            "thickness": 2
+        },
+        "breadth_minervini_pct": {
+            "window": 1,
+            "period": "D",
+            "type": "BREADTH_MINERVINI",
+            "aggregation": "all",
+            "mode": "pct_abs",
+            "color": "magenta",
+            "style": "solid",
+            "pane": "pct_abs",
+            "chart_type": "line",
+            "thickness": 2
         }
     }
 }

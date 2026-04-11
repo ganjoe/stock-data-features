@@ -14,3 +14,6 @@
 | F-OUT-080 | Storage | Parquet Target Overwrite | Die berechneten Features müssen vorerst per Overwrite-Verfahren unter dem Pfad `/data/parquet/<ticker>/<timeframe>_features.parquet` abgespeichert werden. | - |
 | F-LOG-090 | Error | Terminal Error Logging | Schlägt die Berechnung für einen Ticker fehl, muss der Fehler ins Terminal geloggt werden, während der Prozess die übrigen Ticker weiter abarbeitet. | - |
 | F-PRC-100 | Data | Backfill Missing Data | Wenn historische Daten für Indikatoren fehlen, muss das System künstliche Daten durch Rückwärts-Duplikation des ersten Tages erzeugen, sodass Indikatoren niemals Null/0 sind. | - |
+| F-CFG-010 | Config | Aggregation Tagging | In der `features.json` können Indikatoren mit dem Parameter `"aggregation": "all"` markiert werden, um sie als aktienübergreifende Metriken zu kennzeichnen. | - |
+| F-PRC-110 | Process | Globale Vorab-Berechnung | Markierte "aggregated"-Indikatoren werden in der Pre-Compute-Phase (Pass 0) aufgesammelt und global exakt einmal über den gesamten Marktdatensatz berechnet. | - |
+| F-PRC-120 | Process | Globale Injektion | Die resultierende Zeitreihe der aggregierten Metriken wird in Pass 1 automatisiert als Spalte in die Parquet-Strukturen aller individuellen Ticker injiziert. | - |

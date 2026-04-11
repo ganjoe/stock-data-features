@@ -1,1 +1,3 @@
-/home/daniel/stock-data-node/config/settings.json
+{
+    "processing_threads": 16
+}

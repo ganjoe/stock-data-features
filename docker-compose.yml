@@ -8,8 +8,11 @@ services:
     environment:
       - APP_BASE_DIR=/app
       - FEATURES_API_PORT=8003
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
     volumes:
-      # Config (features.json lives here, settings.json via symlink)
+      # Config (features.json and settings.json live here)
       - /home/daniel/stock-data-features/config:/app/config
       # Shared parquet data (read OHLCV, write *_features.parquet)
       - /home/daniel/stock-data-node/data:/app/data

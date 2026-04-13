@@ -820,3 +820,10 @@
 11.04.2026 08:51:10 | ERROR    | processor                 | Error processing VCNX [1D]: Source file not found: /app/data/parquet/VCNX/1D.parquet
 11.04.2026 08:51:10 | ERROR    | processor                 | Error processing ACFN [1D]: Source file not found: /app/data/parquet/ACFN/1D.parquet
 11.04.2026 08:51:10 | ERROR    | processor                 | Error processing CREVF [1D]: Source file not found: /app/data/parquet/CREVF/1D.parquet
+12.04.2026 20:49:48 | ERROR    | job_manager               | Background job failed with exception: name 'FeatureConfigParser' is not defined
+12.04.2026 20:50:21 | ERROR    | job_manager               | Background job failed with exception: name 'FeatureConfigParser' is not defined
+12.04.2026 21:00:49 | ERROR    | job_manager               | Background job failed with exception: name 'FeatureConfigParser' is not defined
+13.04.2026 01:22:14 | ERROR    | job_manager               | Background job failed with exception: name 'FeatureConfigParser' is not defined
+13.04.2026 16:35:34 | ERROR    | job_manager               | Background job failed with exception: name 'FeatureConfigParser' is not defined
+13.04.2026 16:36:38 | ERROR    | job_manager               | Background job failed with exception: name 'FeatureConfigParser' is not defined
+13.04.2026 16:36:45 | ERROR    | job_manager               | Background job failed with exception: name 'FeatureConfigParser' is not defined

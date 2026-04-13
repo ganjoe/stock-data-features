@@ -21,6 +21,11 @@ zwei Berechnungsmodi bereit:
                       - RS Rating (IBD-Methode)       via POST /features/rs
                       - Minervini Trend Template      via POST /features/minervini
 
+  3. SCANNER-MODUS: Filtert das gesamte Aktienuniversum basierend auf
+                    beliebigen Indikatoren (z.B. RS Rating > 90).
+                    Ergebnisse werden als Watchlist (.txt) exportiert
+                    via POST /scanner/run.
+
 
 Programmablauf
 --------------
@@ -277,6 +282,47 @@ Prüft alle 8 Bedingungen des Mark Minervini SEPA-Systems.
     curl -X POST http://localhost:8003/features/minervini \
       -H "Content-Type: application/json" \
       -d '{"ticker": "NVDA"}'
+
+
+POST /scanner/run
+------------------
+Filtert sämtliche Ticker basierend auf einem Indikator und exportiert eine Watchlist.
+
+  Request Body (JSON):
+    {
+      "scanner_name":  "ibd_rs",       (string, Pflicht)  ID des Indikators (wie in features.json)
+      "condition":     "higher",       (string, Pflicht)  "higher", "lower" oder "range"
+      "value":         90,             (float,  Opt.)     Schwellenwert für higher/lower
+      "min_val":       20,             (float,  Opt.)     Minimum für range
+      "max_val":       80              (float,  Opt.)     Maximum für range
+    }
+
+  Hinweis: Der Dateiname der exportierten Watchlist entspricht dem "scanner_name".
+
+  Response (200 OK):
+    {
+      "status":         "success",
+      "scanner":        "ibd_rs",
+      "matches_found":  142,
+      "watchlist_path": "/app/data/watchlists/ibd_rs.txt"
+    }
+
+  Beispiele:
+
+    # Alle Aktien mit RS Rating > 90 finden
+    curl -X POST http://localhost:8003/scanner/run \
+      -H "Content-Type: application/json" \
+      -d '{"scanner_name": "ibd_rs", "condition": "higher", "value": 90}'
+
+    # Alle Aktien mit Trend Template (Score = 8)
+    curl -X POST http://localhost:8003/scanner/run \
+      -H "Content-Type: application/json" \
+      -d '{"scanner_name": "minervini_score", "condition": "higher", "value": 8}'
+
+    # Aktien mit Stochastik %K im Bereich 20 bis 80
+    curl -X POST http://localhost:8003/scanner/run \
+      -H "Content-Type: application/json" \
+      -d '{"scanner_name": "stock_10_k", "condition": "range", "min_val": 20, "max_val": 80}'
 
 
 GET /status

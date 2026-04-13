@@ -18,5 +18,7 @@ services:
       - /home/daniel/stock-data-node/data:/app/data
       # Log files
       - /home/daniel/stock-data-features/logs:/app/logs
+      # Static UI files
+      - /home/daniel/stock-data-features/static:/app/static
     network_mode: "host"
     tty: true

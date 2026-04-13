@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Data Dashboard</title>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --text-color: #c9d1d9;
+            --accent-color: #58a6ff;
+            --border-color: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            width: 100%;
+            max-width: 600px;
+        }
+        h1 { border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        h2 { margin-top: 0; font-size: 1.2rem; color: var(--accent-color); }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9rem; }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background-color: #238636;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background-color: #2ea043; }
+        a { color: var(--accent-color); text-decoration: none; }
+        .status-link { display: inline-block; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Stock Data Node</h1>
+
+        <!-- Feature Calculation -->
+        <div class="card">
+            <h2>Feature-Berechnung</h2>
+            <p style="font-size: 0.8rem; opacity: 0.7;">Startet den globalen Download- und Berechnungszyklus für alle Ticker.</p>
+            <form action="/features/calculate" method="POST">
+                <button type="submit">Berechnung starten</button>
+            </form>
+        </div>
+
+        <!-- Universal Scanner -->
+        <div class="card">
+            <h2>Universal Scanner</h2>
+            <form id="scannerForm" action="/scanner/run" method="POST">
+                <div class="form-group">
+                    <label for="scanner_name">Indikator (z.B. ibd_rs, minervini_score)</label>
+                    <input type="text" id="scanner_name" name="scanner_name" required value="ibd_rs">
+                </div>
+                <div class="form-group">
+                    <label for="condition">Bedingung</label>
+                    <select id="condition" name="condition">
+                        <option value="higher">Höher als (higher)</option>
+                        <option value="lower">Niedriger als (lower)</option>
+                        <option value="range">Bereich (range)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="value">Wert (für higher/lower)</label>
+                    <input type="number" id="value" name="value" step="0.1" value="90">
+                </div>
+                <div class="form-group">
+                    <label>Bereich (nur für range)</label>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="number" name="min_val" placeholder="Min" step="0.1">
+                        <input type="number" name="max_val" placeholder="Max" step="0.1">
+                    </div>
+                </div>
+                <button type="submit">Scan starten</button>
+            </form>
+        </div>
+
+        <!-- System Status -->
+        <div class="card">
+            <h2>System Status</h2>
+            <p>Prüfen, ob gerade ein Hintergrund-Job läuft:</p>
+            <a href="/status" class="status-link">➔ Status abrufen (JSON)</a>
+        </div>
+    </div>
+
+    <script>
+        // Kleiner Helper um die Formulare als JSON an die API zu senden
+        // So vermeiden wir komplexe Frameworks aber halten die API sauber.
+        document.querySelectorAll('form').forEach(form => {
+            form.addEventListener('submit', async (e) => {
+                // Nur den Scanner-Form-Submit abfangen um JSON zu senden
+                if (form.id === 'scannerForm') {
+                    e.preventDefault();
+                    const formData = new FormData(form);
+                    const data = Object.fromEntries(formData.entries());
+                    
+                    // Numerische Werte konvertieren
+                    if (data.value) data.value = parseFloat(data.value);
+                    if (data.min_val) data.min_val = parseFloat(data.min_val);
+                    if (data.max_val) data.max_val = parseFloat(data.max_val);
+
+                    // API Call
+                    const response = await fetch(form.action, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                    const result = await response.json();
+                    
+                    // Ergebnis in neuem Fenster/Tab anzeigen (entspricht dem Wunsch "ohne iframe")
+                    const win = window.open("", "_blank");
+                    win.document.write('<pre>' + JSON.stringify(result, null, 2) + '</pre>');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

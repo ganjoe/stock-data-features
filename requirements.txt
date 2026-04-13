@@ -8,3 +8,4 @@ pydantic_core==2.41.5
 starlette==0.52.1
 typing_extensions==4.15.0
 pytest==9.0.2
+aiofiles==24.1.0

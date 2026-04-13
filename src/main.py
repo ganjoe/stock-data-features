@@ -19,17 +19,18 @@ import pandas as pd
 
 import uvicorn
 from fastapi import FastAPI, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
 # ─── Bootstrap: ensure src/ is on the path ──────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config_parser import FeatureConfigParser, FeatureConfig, FeatureType, ProcessingContext
 from calculator import TechnicalCalculator
 from parquet_io import ParquetStorage
 from processor import FeatureProcessor
 from job_manager import JobManager
+from scanner import ScannerEngine
 
 
 # ─── Request Models ──────────────────────────────────────────────
@@ -68,6 +69,22 @@ class MinerviniRequest(BaseModel):
     """Request body for on-the-fly Minervini Trend Template calculation."""
     ticker: str                                  # e.g. "AAPL"
     chart_timeframe: str = "1D"                  # source data timeframe
+
+class ScannerRequest(BaseModel):
+    """Request body for universal indicator scanner."""
+    scanner_name: str                            # e.g. "ibd_rs" (also the column name to scan)
+    condition: str                               # "higher", "lower", "range"
+    value: Optional[float] = None                # threshold for higher/lower
+    min_val: Optional[float] = None              # min for range
+    max_val: Optional[float] = None              # max for range
+
+    @field_validator("condition")
+    @classmethod
+    def validate_condition(cls, v: str) -> str:
+        v = v.lower()
+        if v not in ("higher", "lower", "range"):
+            raise ValueError(f"condition must be 'higher', 'lower', or 'range', got '{v}'")
+        return v
 
 # ─── Logging Setup ───────────────────────────────────────────────
 
@@ -142,6 +159,7 @@ BASE_DIR = Path(os.environ.get("APP_BASE_DIR", Path(__file__).parent.parent))
 CONFIG_DIR = str(BASE_DIR / "config")
 LOG_DIR = str(BASE_DIR / "logs")
 DATA_DIR = str(BASE_DIR / "data" / "parquet")
+WATCHLISTS_DIR = str(BASE_DIR / "data" / "watchlists")
 API_PORT = int(os.environ.get("FEATURES_API_PORT", "8003"))
 
 
@@ -222,7 +240,48 @@ def create_app() -> FastAPI:
         version="1.0.0",
     )
 
+    # ─── Static Files & UI ───────────────────────────────────────────
+    # Mount the static directory for the minimalist dashboard
+    static_path = Path(BASE_DIR) / "static"
+    if not static_path.exists():
+        static_path.mkdir(parents=True, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+
+    @app.get("/")
+    async def root():
+        """Redirect root to the minimalist dashboard."""
+        return RedirectResponse(url="/static/index.html")
+
     job_manager = JobManager()
+    storage = ParquetStorage(DATA_DIR)
+    scanner_engine = ScannerEngine(storage, WATCHLISTS_DIR)
+
+    @app.post("/scanner/run")
+    async def run_universal_scanner(req: ScannerRequest):
+        """
+        Triggers a universal scan for a specific indicator.
+        Filters tickers based on condition (higher/lower/range).
+        Exports result to data/watchlists/<scanner_name>.txt.
+        """
+        try:
+            matches = scanner_engine.run_scan(
+                req.scanner_name, 
+                req.condition, 
+                req.value, 
+                req.min_val, 
+                req.max_val
+            )
+            return {
+                "status": "success",
+                "scanner": req.scanner_name,
+                "matches_found": len(matches),
+                "watchlist_path": f"{WATCHLISTS_DIR}/{req.scanner_name}.txt"
+            }
+        except Exception as e:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"status": "error", "detail": str(e)}
+            )
 
     @app.post("/features/calculate")
     async def trigger_feature_calculation(stream: bool = False):

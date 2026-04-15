@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 import os
 import re
 import sys
@@ -27,6 +28,7 @@ from pydantic import BaseModel, field_validator
 sys.path.insert(0, str(Path(__file__).parent))
 
 from calculator import TechnicalCalculator
+from config_parser import FeatureConfigParser, ProcessingContext, FeatureType
 from parquet_io import ParquetStorage
 from processor import FeatureProcessor
 from job_manager import JobManager
@@ -174,8 +176,14 @@ def _load_settings() -> dict:
 
 # ─── Feature Pipeline Runner ────────────────────────────────────
 
-def run_feature_pipeline() -> None:
+def run_feature_pipeline(log_queue: Optional[multiprocessing.Queue] = None) -> None:
     """Runs the full feature calculation pipeline (blocking)."""
+    # Import inside to ensure availability in background threads and avoid name collisions/shadowing
+    from config_parser import FeatureConfigParser, ProcessingContext
+    from calculator import TechnicalCalculator
+    from parquet_io import ParquetStorage
+    from processor import FeatureProcessor
+
     config_parser = FeatureConfigParser(str(Path(CONFIG_DIR) / "features.json"))
     features = config_parser.parse()
 
@@ -226,7 +234,7 @@ def run_feature_pipeline() -> None:
 
     calculator = TechnicalCalculator()
     processor = FeatureProcessor(ctx, storage, calculator)
-    results = processor.process_all_tickers(tickers)
+    results = processor.process_all_tickers(tickers, log_queue=log_queue)
     success_count = sum(1 for r in results if r.success)
     logger.info("✅ Feature calculation finished: %d/%d successful", success_count, len(results))
 

@@ -10,8 +10,6 @@ from config_parser import FeatureConfig, ProcessingContext, FeatureType
 from calculator import TechnicalCalculator
 from parquet_io import ParquetStorage
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -132,7 +130,7 @@ class FeatureProcessor:
                     
         return result_dict
 
-    def process_all_tickers(self, tickers: List[str]) -> List[TickerProcessResult]:
+    def process_all_tickers(self, tickers: List[str], log_queue: Optional[multiprocessing.Queue] = None) -> List[TickerProcessResult]:
         """Spawns parallel processes to compute features for all tickers."""
         import time
         start_time = time.perf_counter()
@@ -152,7 +150,7 @@ class FeatureProcessor:
             for t in tickers:
                 # Extract the small CS dictionary for this specific ticker across all timeframes
                 ticker_cs = {tf: global_cs_data.get(tf, {}).get(t, {}) for tf in self.context.timeframes}
-                future_to_ticker[executor.submit(self._process_single_ticker, t, ticker_cs)] = t
+                future_to_ticker[executor.submit(self._process_single_ticker, t, ticker_cs, log_queue)] = t
             
             for future in as_completed(future_to_ticker):
                 ticker = future_to_ticker[future]
@@ -189,40 +187,53 @@ class FeatureProcessor:
         
         return results
 
-    def _process_single_ticker(self, ticker: str, precomputed_cs: Dict[str, Dict[str, pd.Series]]) -> List[TickerProcessResult]:
+    def _process_single_ticker(self, ticker: str, precomputed_cs: Dict[str, Dict[str, pd.Series]], log_queue: Optional[multiprocessing.Queue] = None) -> List[TickerProcessResult]:
         """The atomic unit of work executed by worker threads/processes."""
+        handler = None
+        if log_queue:
+            import logging
+            from logging.handlers import QueueHandler
+            handler = QueueHandler(log_queue)
+            root_logger = logging.getLogger()
+            root_logger.addHandler(handler)
+            root_logger.setLevel(logging.DEBUG)
+
         ticker_results = []
         
-        for tf in self.context.timeframes:
-            try:
-                # 1. Load Data
-                df = self.storage.load_ticker_data(ticker, tf)
-                
-                # 1.5 Inject pre-computed cross-sectional features FIRST so Minervini/etc can use them
-                if precomputed_cs and tf in precomputed_cs and precomputed_cs[tf]:
-                    for col, series in precomputed_cs[tf].items():
-                        mapped = df['timestamp'].map(series)
-                        if series.dtype.name == 'Int64':
-                            df[col] = mapped.astype("Int64")
-                        else:
-                            df[col] = mapped.astype("float64")
-                
-                # 2. Calculate Features
-                df_with_features = self.calculator.calculate_features(df, self.context.features)
-                
-                # Clean up intermediate "_raw" columns before saving
-                raw_cols = [c for c in df_with_features.columns if c.endswith("_raw")]
-                df_with_features.drop(columns=raw_cols, inplace=True, errors='ignore')
-                
-                # 3. Save Data
-                self.storage.save_ticker_features(ticker, tf, df_with_features)
-                
-                pts = len(df_with_features) if df_with_features is not None else 0
-                ticker_results.append(TickerProcessResult(ticker, tf, True, data_points=pts))
-                
-            except Exception as e:
-                error_msg = f"Error processing {ticker} [{tf}]: {str(e)}"
-                logger.error(error_msg)
-                ticker_results.append(TickerProcessResult(ticker, tf, False, 0, error_msg))
-                
+        try:
+            for tf in self.context.timeframes:
+                try:
+                    # 1. Load Data
+                    df = self.storage.load_ticker_data(ticker, tf)
+                    
+                    # 1.5 Inject pre-computed cross-sectional features FIRST so Minervini/etc can use them
+                    if precomputed_cs and tf in precomputed_cs and precomputed_cs[tf]:
+                        for col, series in precomputed_cs[tf].items():
+                            mapped = df['timestamp'].map(series)
+                            if series.dtype.name == 'Int64':
+                                df[col] = mapped.astype("Int64")
+                            else:
+                                df[col] = mapped.astype("float64")
+                    
+                    # 2. Calculate Features
+                    df_with_features = self.calculator.calculate_features(df, self.context.features)
+                    
+                    # Clean up intermediate "_raw" columns before saving
+                    raw_cols = [c for c in df_with_features.columns if c.endswith("_raw")]
+                    df_with_features.drop(columns=raw_cols, inplace=True, errors='ignore')
+                    
+                    # 3. Save Data
+                    self.storage.save_ticker_features(ticker, tf, df_with_features)
+                    
+                    pts = len(df_with_features) if df_with_features is not None else 0
+                    ticker_results.append(TickerProcessResult(ticker, tf, True, data_points=pts))
+                    
+                except Exception as e:
+                    error_msg = f"Error processing {ticker} [{tf}]: {str(e)}"
+                    logger.error(error_msg)
+                    ticker_results.append(TickerProcessResult(ticker, tf, False, 0, error_msg))
+        finally:
+            if handler:
+                logging.getLogger().removeHandler(handler)
+
         return ticker_results

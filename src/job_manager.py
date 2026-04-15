@@ -1,5 +1,6 @@
 import threading
 import logging
+import multiprocessing
 import queue
 from typing import Callable, Generator
 
@@ -33,6 +34,7 @@ class JobManager:
                 cls._instance = super(JobManager, cls).__new__(cls)
                 cls._instance._is_running = False
                 cls._instance._internal_lock = threading.Lock()
+                cls._instance._internal_manager = multiprocessing.Manager()
             return cls._instance
 
     def start_feature_calculation(self, run_func: Callable, *args, **kwargs) -> bool:
@@ -65,22 +67,34 @@ class JobManager:
                 return
             self._is_running = True
 
-        log_queue = queue.Queue()
-        handler = QueueHandler(log_queue)
+        # Use a persistent Manager to create a proxy queue that can be pickled
+        # and safely passed to ProcessPoolExecutor worker processes. This avoids 
+        # destroying the Manager proxy when the HTTP stream generator exits early.
+        mp_queue = self._internal_manager.Queue()
+        handler = QueueHandler(mp_queue)
         handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         
-        # Attach to the processor's logger
-        target_logger = logging.getLogger('processor')
+        # Attach to the root logger to capture all logs in the main process
+        target_logger = logging.getLogger()
         target_logger.addHandler(handler)
+        target_logger.setLevel(logging.DEBUG)
         
         # Shared stop event for the generator loop
         done = threading.Event()
+
+        # Inject the queue into kwargs so it can be passed to run_func and then to workers
+        kwargs['log_queue'] = mp_queue
 
         def run_and_signal():
             try:
                 run_func(*args, **kwargs)
             except Exception as e:
-                log_queue.put(f"ERROR: {e}")
+                # Since we are in a thread but the main work is in processes,
+                # this catch is for errors in the thread itself.
+                import traceback
+                error_details = traceback.format_exc()
+                logger.error(f"ERROR in runner thread:\n{error_details}")
+                mp_queue.put(f"ERROR in runner thread: {e}\n{error_details}")
             finally:
                 done.set()
                 target_logger.removeHandler(handler)
@@ -91,11 +105,13 @@ class JobManager:
         thread.start()
 
         # Yield from queue until done
-        while not done.is_set() or not log_queue.empty():
+        while not done.is_set() or not mp_queue.empty():
             try:
-                msg = log_queue.get(timeout=0.1)
-                yield msg + "\n"
-            except queue.Empty:
+                msg = mp_queue.get(timeout=0.1)
+                if hasattr(msg, 'getMessage'):  # Check if it's a LogRecord
+                    msg = f"{msg.asctime if hasattr(msg, 'asctime') else ''} | {msg.levelname} | {msg.getMessage()}"
+                yield str(msg) + "\n"
+            except (queue.Empty, EOFError):
                 continue
 
     def _run_wrapper(self, run_func, args, kwargs):
